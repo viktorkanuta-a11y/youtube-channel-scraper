@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 YouTube channel scraper → Excel (.xlsx)
-Запуск: py youtube_scraper.py
+Запуск: py youtube_scraper.py [--url КАНАЛ] [--limit N] [--output ФАЙЛ]
 """
 
 import sys
@@ -11,13 +11,16 @@ import json
 import os
 import glob
 import time
+import argparse
+import platform
 from datetime import datetime
+from pathlib import Path
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
-# ─── автоустановка зависимостей ───────────────────────────────────────────────
+# ─── автоустановка зависимостей ────────────────────────────────────────────
 def ensure_deps():
     missing = []
     try:
@@ -39,7 +42,32 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
 
-# ─── поиск файла куков ────────────────────────────────────────────────────────
+# ─── открытие папки кроссплатформенно ───────────────────────────────────────
+def open_file_in_explorer(filepath: str):
+    """Открывает папку и выделяет файл (Windows/Mac/Linux)."""
+    filepath = os.path.abspath(filepath)
+    
+    try:
+        system = platform.system()
+        
+        if system == "Windows":
+            # Windows: используем explorer с /select
+            subprocess.Popen(["explorer", "/select,", filepath])
+        elif system == "Darwin":
+            # macOS: используем open с -R (reveal)
+            subprocess.Popen(["open", "-R", filepath])
+        else:
+            # Linux: открываем папку в файловом менеджере
+            folder = os.path.dirname(filepath)
+            subprocess.Popen(["xdg-open", folder])
+        
+        print(f"✓ Папка открыта: {os.path.dirname(filepath)}")
+    except Exception as e:
+        print(f"⚠ Не удалось открыть папку: {e}")
+        print(f"  Файл находится здесь: {filepath}")
+
+
+# ─── поиск файла куков ──────────────────────────────────────────────────────
 def find_cookies_file() -> str | None:
     user = os.path.expanduser("~")
     search_dirs = [
@@ -62,7 +90,7 @@ def find_cookies_file() -> str | None:
     return candidates[0]
 
 
-# ─── вспомогательные функции ─────────────────────────────────────────────────
+# ─── вспомогательные функции ──────────────────────────────────────────────────
 def parse_date(raw) -> str:
     if not raw:
         return ""
@@ -173,7 +201,7 @@ def save_xlsx_safe(rows: list[dict], output: str):
             )
 
 
-# ─── получение метаданных с повтором при ошибках ─────────────────────────────
+# ─── получение метаданных с повтором при ошибках ────────────────────────────
 def fetch_playlist(url: str, cookies_file: str, max_videos: int | None) -> list[dict]:
     """Получает список видео. Повторяет при ошибке куков."""
     while True:
@@ -253,8 +281,8 @@ def fetch_video_detail(video_url: str, cookies_file: str) -> dict | None:
     return parse_json_output(stdout)
 
 
-# ─── основной сбор данных ─────────────────────────────────────────────────────
-def scrape(channel_url: str, cookies_file: str, max_videos: int | None = None):
+# ─── основной сбор данных ────────────────────────────────────────────────────
+def scrape(channel_url: str, cookies_file: str, max_videos: int | None = None, output_file: str | None = None):
     url = channel_url.rstrip("/")
     if not any(url.endswith(s) for s in ("/videos", "/shorts", "/streams")):
         url += "/videos"
@@ -263,6 +291,10 @@ def scrape(channel_url: str, cookies_file: str, max_videos: int | None = None):
     print("Загружаю список видео...\n")
 
     entries = fetch_playlist(url, cookies_file, max_videos)
+    if not entries:
+        print("[!] Видео не найдены. Проверь ссылку и доступ к каналу.")
+        return
+    
     total = len(entries)
     print(f"Найдено видео: {total}. Собираю метаданные...\n")
 
@@ -271,7 +303,12 @@ def scrape(channel_url: str, cookies_file: str, max_videos: int | None = None):
     cookies_refreshed = False
 
     for i, entry in enumerate(entries, 1):
-        video_id = entry["id"]
+        video_id = entry.get("id")
+        if not video_id:
+            print(f"[{i}/{total}] [!] ID видео не найден, пропускаю")
+            skipped += 1
+            continue
+            
         video_url = f"https://www.youtube.com/watch?v={video_id}"
         title_preview = (entry.get("title") or video_url)[:72]
         print(f"[{i}/{total}] {title_preview}")
@@ -322,25 +359,31 @@ def scrape(channel_url: str, cookies_file: str, max_videos: int | None = None):
             "description": desc,
         })
 
-    # Сохраняем с обработкой занятого файла
-    handle = re.sub(r"[^\w\-]", "_", channel_url.rstrip("/").split("/")[-1])
-    output = f"{handle}.xlsx"
-    print(f"\nСохраняю {output}...")
-    save_xlsx_safe(rows, output)
+    if not rows:
+        print("[!] Не удалось собрать ни одного видео.")
+        return
 
-    abs_output = os.path.abspath(output)
+    # Определяем имя выходного файла
+    if not output_file:
+        handle = re.sub(r"[^\w\-]", "_", channel_url.rstrip("/").split("/")[-1])
+        output_file = f"{handle}.xlsx"
+
+    print(f"\nСохраняю {output_file}...")
+    save_xlsx_safe(rows, output_file)
+
+    abs_output = os.path.abspath(output_file)
     print(f"\n{'='*50}")
-    print(f"Собрано видео:  {len(rows)}")
+    print(f"✓ Собрано видео:  {len(rows)}")
     if skipped:
-        print(f"Пропущено:      {skipped}")
-    print(f"Файл:           {abs_output}")
+        print(f"⚠ Пропущено:      {skipped}")
+    print(f"📁 Файл:          {abs_output}")
     print(f"{'='*50}")
 
-    # Открываем папку с файлом и выделяем его
-    subprocess.Popen(["explorer", "/select,", abs_output])
+    # Открываем папку с файлом
+    open_file_in_explorer(abs_output)
 
 
-# ─── запрос куков с обработкой ────────────────────────────────────────────────
+# ─── запрос куков с обработкой ──────────────────────────────────────────────
 def ask_cookies() -> str:
     while True:
         found = find_cookies_file()
@@ -373,23 +416,62 @@ def ask_cookies() -> str:
         )
 
 
-# ─── точка входа ──────────────────────────────────────────────────────────────
+# ─── CLI парсер ─────────────────────────────────────────────────────────────
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="YouTube Channel Scraper — сохраняет видео канала в Excel",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Примеры:
+  py youtube_scraper.py
+  py youtube_scraper.py --url https://www.youtube.com/@mkbhd
+  py youtube_scraper.py --url https://www.youtube.com/@mkbhd --limit 50
+  py youtube_scraper.py --url https://www.youtube.com/@mkbhd --limit 50 --output my_videos.xlsx
+        """
+    )
+    parser.add_argument("--url", type=str, help="URL канала YouTube")
+    parser.add_argument("--limit", type=int, help="Максимум видео для загрузки")
+    parser.add_argument("--output", type=str, help="Путь к выходному файлу Excel")
+    parser.add_argument("--cookies", type=str, help="Путь к файлу cookies.txt")
+    
+    return parser.parse_args()
+
+
+# ─── точка входа ────────────────────────────────────────────────────────────
 def main():
     print("=" * 50)
     print("  YouTube Channel Scraper → Excel")
     print("=" * 50)
 
-    channel_url = input("\nСсылка на канал: ").strip().lstrip("﻿")
-    if not channel_url:
-        print("Ссылка не указана.")
-        sys.exit(1)
+    args = parse_args()
 
-    limit_str = input("Сколько последних видео собрать? (Enter = все): ").strip()
-    max_videos = int(limit_str) if limit_str.isdigit() else None
+    # Получаем URL канала
+    if args.url:
+        channel_url = args.url
+    else:
+        channel_url = input("\nСсылка на канал: ").strip().lstrip("\ufeff")
+        if not channel_url:
+            print("Ссылка не указана.")
+            sys.exit(1)
 
-    cookies_file = ask_cookies()
+    # Получаем лимит видео
+    if args.limit:
+        max_videos = args.limit
+    else:
+        limit_str = input("Сколько последних видео собрать? (Enter = все): ").strip()
+        max_videos = int(limit_str) if limit_str.isdigit() else None
 
-    scrape(channel_url, cookies_file, max_videos)
+    # Получаем путь к куки файлу
+    if args.cookies:
+        cookies_file = args.cookies
+        if not os.path.isfile(cookies_file):
+            print(f"[!] Файл куков не найден: {cookies_file}")
+            sys.exit(1)
+    else:
+        cookies_file = ask_cookies()
+
+    # Запускаем скрейпинг
+    scrape(channel_url, cookies_file, max_videos, args.output)
 
 
 if __name__ == "__main__":
